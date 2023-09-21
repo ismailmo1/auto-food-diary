@@ -6,14 +6,13 @@ Bot to identify food pics from Telegram messages.
 Usage:
 Send food pic to bot, tries to identify food and reply with predictions.
 """
-
-import asyncio
+from collections import Counter
 import logging
-from typing import List
 from dotenv import load_dotenv
 from os import getenv
-
-import random
+from super_gradients.training import models
+from super_gradients.common.object_names import Models
+from model.predict import predict
 
 from telegram import Update
 from telegram.ext import (
@@ -28,6 +27,9 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 
 load_dotenv()
 TELEGRAM_TOKEN = getenv("TELEGRAM_TOKEN")
+
+# initialise model
+model = None
 # Enable logging
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
@@ -72,19 +74,23 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # largest photo is last index
     file_id = update.message.photo[-1].file_id
     new_file = await context.bot.get_file(file_id)
-    await new_file.download_to_drive()
+    await new_file.download_to_drive(f"{file_id}.jpeg")
     logger.info(f"downloaded file of size {sizeof_fmt(new_file.file_size)}")
 
     await update.message.reply_text(f"hang on, let me figure out what this is...")
-    await asyncio.sleep(10)
 
-    predicted_food = predict_food(file_id)
+    predicted_foods = predict_food(f"{file_id}.jpeg")
+    # group foods
+    food_counts = Counter(predicted_foods)
+    food_count_msg = "\n".join(
+        [f"{count} {food}" for food, count in food_counts.items()]
+    )
     await update.message.reply_text(
-        f"Oh nice! I can see you have a nice meal of {predicted_food}"
+        f"Oh nice! I can see you have a nice meal of:\n{food_count_msg}"
     )
 
 
-def predict_food(image_url: str) -> str:
+def predict_food(image_url: str) -> list[str]:
     """
     return a prediction of a food label from an image url
 
@@ -92,12 +98,12 @@ def predict_food(image_url: str) -> str:
         image_url (str): absolute url to image to run prediction on
 
     Returns:
-        str: predicted food
+        list[str]: predicted foods
     """
     logger.info(f"predicting food label for {image_url}")
-    # worst model ever lmao (can only get better from here?)
-    foods = ["chicken", "rice", "veg", "nothing"]
-    return random.choice(foods)
+    foods = predict(image_url, model)
+    # TODO: return annotated image
+    return foods
 
 
 def add_handlers(application: Application) -> None:
@@ -105,7 +111,17 @@ def add_handlers(application: Application) -> None:
     application.add_handler(MessageHandler(filters.PHOTO, photo_handler))
 
 
+def initialise_model() -> None:
+    """load model with pretrained weights"""
+    # HACK: i dont like this - see if theres a better convention for this
+    global model
+    if model is None:
+        model = models.get(Models.YOLO_NAS_S, pretrained_weights="coco")
+
+
 def main() -> None:
+    # load model once on initial app load
+    initialise_model()
     # build application
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     add_handlers(application)
